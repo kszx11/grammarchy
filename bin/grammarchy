@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""Bounded, local-only parser adapter for Grammarchy."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import site
+import tomllib
+import unicodedata
+from pathlib import Path
+
+MAX_CHARS = 1000
+MAX_TOKENS = 128
+SCHEMA_VERSION = 1
+UDPIPE_VERSION = "1.4.0"
+UDPIPE_MODEL_VERSION = "english-ud-2.1-20180111"
+WORD = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?|[,.!?;:]")
+SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+DETERMINERS = {"a", "an", "the", "this", "that", "these", "those", "my", "your", "his", "her", "our", "their"}
+VERBS = {"am", "are", "be", "been", "being", "is", "was", "were", "do", "does", "did", "have", "has", "had", "can", "could", "will", "would", "shall", "should", "may", "might", "must", "sleep", "run", "walk", "jump", "jumps", "sing", "sings", "dance", "dances", "write", "writes", "read", "reads", "make", "makes", "say", "says", "go", "goes", "know", "knows", "think", "thinks", "see", "sees", "want", "wants", "need", "needs", "like", "likes", "use", "uses", "work", "works", "found", "find", "finds", "saw", "chased", "gave", "took", "wrote"}
+PRONOUNS = {"i", "you", "he", "she", "it", "we", "they", "who", "what", "this", "that", "these", "those"}
+CONJUNCTIONS = {"and", "but", "or", "nor", "yet", "so"}
+PREPOSITIONS = {"about", "above", "across", "after", "against", "among", "around", "at", "before", "behind", "below", "beneath", "beside", "between", "by", "during", "for", "from", "in", "inside", "into", "near", "of", "off", "on", "onto", "over", "through", "to", "under", "up", "with", "without"}
+COMMON_ADJECTIVES = {"quick", "lazy", "lost", "big", "small", "good", "bad", "bright", "dark", "happy", "sad", "old", "new", "red", "blue", "green", "little", "large"}
+MODES = {"reed_kellogg", "dependency"}
+DEFAULT_CONFIG = {
+    "widget": {"width_px": 680, "clipboard_max_chars": 1000, "auto_parse_on_open": True},
+    "parser": {"timeout_ms": 2000},
+    "display": {"mode": "reed_kellogg"},
+}
+
+_NLP = None
+
+def bundled_udpipe() -> tuple[Path, Path] | None:
+    """Return the release-owned parser files for a supported Linux build."""
+    runtime = Path(__file__).resolve().parents[1] / "runtime" / "linux-x86_64"
+    binary, model = runtime / "udpipe", runtime / "english-ewt.udpipe"
+    return (binary, model) if binary.is_file() and os.access(binary, os.X_OK) and model.is_file() else None
+
+def local_nlp():
+    """Load the user-owned spaCy runtime without changing system Python."""
+    global _NLP
+    if _NLP is not None: return _NLP
+    runtime = Path.home() / ".config" / "grammarchy" / "runtime" / "lib"
+    for candidate in runtime.glob("python*/site-packages"):
+        site.addsitedir(str(candidate))
+    try:
+        import spacy
+        _NLP = spacy.load("en_core_web_sm", disable=["ner"])
+    except (ImportError, OSError):
+        _NLP = False
+    return _NLP
+
+def clean(text: str) -> str:
+    text = unicodedata.normalize("NFC", text).replace("’", "'").replace("“", '"').replace("”", '"')
+    return " ".join(text.split())
+
+def config_path() -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(config_home) / "grammarchy" / "config.toml"
+
+def bounded_config() -> dict:
+    result = json.loads(json.dumps(DEFAULT_CONFIG))
+    path = config_path()
+    try:
+        safe_file = path.is_file() and not path.is_symlink() and path.stat().st_size <= 16_384
+    except OSError:
+        safe_file = False
+    if not safe_file:
+        return result
+    try:
+        with path.open("rb") as file: loaded = tomllib.load(file)
+    except (OSError, tomllib.TOMLDecodeError): return result
+    for group, keys in result.items():
+        values = loaded.get(group, {})
+        if not isinstance(values, dict): continue
+        for key, default in keys.items():
+            value = values.get(key)
+            if type(value) is type(default): result[group][key] = value
+    widget, parser, display = result["widget"], result["parser"], result["display"]
+    widget["width_px"] = min(760, max(620, widget["width_px"]))
+    widget["clipboard_max_chars"] = min(MAX_CHARS, max(1, widget["clipboard_max_chars"]))
+    parser["timeout_ms"] = min(10_000, max(100, parser["timeout_ms"]))
+    if display["mode"] not in MODES: display["mode"] = "reed_kellogg"
+    return result
+
+def tokens(text: str) -> list[str]:
+    return [word for word in WORD.findall(text) if word not in ".,!?;:"]
+
+def looks_like_verb(words: list[str], index: int) -> bool:
+    word = words[index].lower()
+    if word in VERBS or word.endswith(("ed", "ing")): return True
+    return word.endswith("s") and index > 0 and words[index - 1].lower() not in DETERMINERS and words[index - 1].lower() not in CONJUNCTIONS
+
+def role(words: list[str], index: int, verb_index: int, subject_index: int, preposition_objects: set[int]) -> str:
+    lower = words[index].lower()
+    previous = words[index - 1].lower() if index else ""
+    following = words[index + 1].lower() if index + 1 < len(words) else ""
+    if lower in DETERMINERS: return "determiner"
+    if lower in CONJUNCTIONS: return "conjunction"
+    if lower in PREPOSITIONS: return "preposition"
+    if lower in COMMON_ADJECTIVES: return "adjective"
+    if index == verb_index: return "predicate"
+    if index == subject_index or lower in PRONOUNS and index < verb_index: return "subject"
+    if index in preposition_objects: return "object of preposition"
+    if index < verb_index: return "subject modifier"
+    if lower.endswith("ly"): return "adverbial modifier"
+    return "object / complement" if index == verb_index + 1 else "predicate modifier"
+
+def fallback_part_of_speech(display_role: str) -> str:
+    """Supply a transparent, limited POS label when spaCy is unavailable."""
+    return {
+        "determiner": "DET", "adjective": "ADJ", "adverbial modifier": "ADV",
+        "preposition": "ADP", "conjunction": "CCONJ", "predicate": "VERB",
+        "subject": "NOUN", "object / complement": "NOUN", "object of preposition": "NOUN",
+    }.get(display_role, "X")
+
+def findings(words: list[str], nodes: list[dict], verb_index: int, subject_index: int) -> list[dict]:
+    """Return conservative, evidence-linked local findings; never call style a rule error."""
+    result = []
+    if subject_index != verb_index:
+        result.append({"kind": "correct", "title": "Complete clause", "message": "A subject and predicate form an independent clause.", "node_ids": [subject_index, verb_index]})
+    subject, verb = words[subject_index].lower(), words[verb_index].lower()
+    plural_subject = subject in {"we", "they"} or subject.endswith("s") and subject not in {"is", "was", "this"}
+    singular_verb = verb.endswith("s") or verb in {"is", "was", "has", "does"}
+    plural_verb = verb in {"are", "were", "have", "do"}
+    if (plural_subject and singular_verb) or (subject in {"i", "you", "we", "they"} and singular_verb) or (subject in {"he", "she", "it"} and plural_verb):
+        result.append({"kind": "error", "title": "Subject–verb agreement", "message": "The subject and verb may not agree in number or person.", "node_ids": [subject_index, verb_index]})
+    else:
+        result.append({"kind": "correct", "title": "Subject–verb agreement", "message": "The subject and finite verb agree in this local analysis.", "node_ids": [subject_index, verb_index]})
+    if any(word.lower() in {"down", "really", "very"} for word in words):
+        result.append({"kind": "style", "title": "Style choice", "message": "This modifier creates a conversational, descriptive tone; it is not a grammar error.", "node_ids": [i for i, word in enumerate(words) if word.lower() in {"down", "really", "very"}]})
+    return result
+
+def spacy_findings(words, index: dict[int, int]) -> list[dict]:
+    """Return small, high-confidence grammar checks grounded in dependencies."""
+    roots = [token for token in words if token.dep_ == "ROOT"]
+    subjects = [token for token in words if token.dep_ in {"nsubj", "nsubjpass"}]
+    result = []
+    if subjects and roots:
+        result.append({"kind": "correct", "title": "Complete clause", "message": "A subject and finite predicate were identified.", "node_ids": [index[subjects[0].i], index[roots[0].i]], "rule_id": "CLAUSE-001"})
+    elif roots and roots[0].tag_ in {"VBG", "VBN"}:
+        result.append({"kind": "possible", "title": "Fragment candidate", "message": "This begins with a participle but has no clear independent subject-predicate clause.", "node_ids": [index[roots[0].i]], "rule_id": "FRAGMENT-001"})
+    else:
+        evidence = [index[roots[0].i]] if roots else []
+        result.append({"kind": "possible", "title": "Incomplete structure", "message": "No clear independent subject-predicate clause was identified.", "node_ids": evidence, "rule_id": "CLAUSE-001"})
+
+    agreement_found = False
+    for subject in subjects:
+        head = subject.head
+        subject_number = subject.morph.get("Number")
+        lower = subject.lower_
+        mismatch = ("Plur" in subject_number and head.tag_ == "VBZ") or ("Sing" in subject_number and lower not in {"i", "you"} and head.tag_ == "VBP") or (lower in {"i", "you"} and head.tag_ == "VBZ")
+        if mismatch:
+            result.append({"kind": "error", "title": "Subject–verb agreement", "message": "This subject and finite verb do not agree in number or person.", "node_ids": [index[subject.i], index[head.i]], "rule_id": "SVA-001"})
+            agreement_found = True
+    if subjects and roots and not agreement_found:
+        result.append({"kind": "correct", "title": "Subject–verb agreement", "message": "The subject and finite verb agree in this local analysis.", "node_ids": [index[subjects[0].i], index[roots[0].i]], "rule_id": "SVA-001"})
+
+    demonstratives = {"this", "that", "these", "those"}
+    for position, token in enumerate(words):
+        if token.lower_ in demonstratives and token.dep_ == "det":
+            noun = token.head if token.head.pos_ in {"NOUN", "PROPN"} else next((candidate for candidate in words[position + 1:position + 3] if candidate.pos_ in {"NOUN", "PROPN"}), None)
+            if noun is None:
+                continue
+            noun_number = noun.morph.get("Number")
+            mismatch = (token.lower_ in {"this", "that"} and "Plur" in noun_number) or (token.lower_ in {"these", "those"} and "Sing" in noun_number)
+            if mismatch:
+                result.append({"kind": "error", "title": "Determiner and noun number", "message": "This demonstrative determiner does not match the noun's number.", "node_ids": [index[token.i], index[noun.i]], "rule_id": "DET-001"})
+
+    tense_roots = [token for token in words if token.dep_ == "ROOT" or token.dep_ == "conj" and token.pos_ in {"VERB", "AUX"}]
+    tenses = {token.morph.get("Tense")[0] for token in tense_roots if token.morph.get("Tense")}
+    if len(tense_roots) > 1 and len(tenses) > 1:
+        result.append({"kind": "possible", "title": "Tense shift", "message": "Coordinated verbs use different tenses. This may be intentional; check the time relationship.", "node_ids": [index[token.i] for token in tense_roots], "rule_id": "TENSE-001"})
+    return result
+
+def spacy_constructions(words, index: dict[int, int]) -> list[dict]:
+    """Surface named English constructions without making provenance claims."""
+    result = []
+    def ids(tokens): return [index[token.i] for token in tokens if token.i in index]
+    def add(title, message, tokens):
+        node_ids = ids(tokens)
+        if node_ids:
+            result.append({"kind": "pattern", "title": title, "message": message, "node_ids": node_ids})
+
+    possessives = [token for token in words if token.dep_ in {"poss", "det"} and ("Yes" in token.morph.get("Poss") or token.lower_ in {"my", "your", "his", "her", "our", "their", "its"})]
+    if len(possessives) >= 2:
+        add("Repeated possessive pronouns", "Several possessive determiners introduce items in this expression.", possessives)
+    for token in words:
+        if token.dep_ in {"dobj", "obj"} and token.lemma_.lower() == token.head.lemma_.lower():
+            add("Cognate object", "The verb and its object share the same base word.", [token.head, token])
+        if token.lower_.endswith(("self", "selves")) and token.morph.get("Reflex"):
+            add("Emphatic self-pronoun", "This self-pronoun adds emphasis to another participant in the clause.", [token, token.head])
+        if token.lower_ == "if" and token.dep_ == "mark":
+            add("Conditional clause", "This clause sets a condition for the main clause.", list(token.head.subtree))
+        if token.dep_ == "prep" and token.head.pos_ in {"VERB", "AUX"}:
+            add("Verb-attached prepositional phrase", "This prepositional phrase adds detail to an action.", list(token.subtree))
+    for verb in words:
+        if verb.lemma_.lower() not in {"cause", "make", "allow", "let", "force"} or verb.pos_ not in {"VERB", "AUX"}:
+            continue
+        complements = [child for child in verb.children if child.dep_ in {"ccomp", "xcomp"} and child.pos_ in {"VERB", "AUX"}]
+        for complement in complements:
+            finite_marker = any(child.lower_ == "that" and child.dep_ == "mark" for child in complement.children)
+            title = "Causative finite clause" if finite_marker else "Causative infinitive"
+            message = "A causative verb introduces a finite clause." if finite_marker else "A causative verb introduces an infinitive action."
+            add(title, message, [verb] + list(complement.subtree))
+    coordinated = [token for token in words if token.dep_ == "conj" and token.pos_ in {"VERB", "AUX"}]
+    if coordinated:
+        add("Coordinated actions", "Conjoined verbs present parallel or sequential actions.", [token.head for token in coordinated] + coordinated)
+    return result
+
+def spacy_diagram(text: str, mode: str) -> dict | None:
+    nlp = local_nlp()
+    if not nlp: return None
+    doc = nlp(text)
+    words = [token for token in doc if not token.is_space and not token.is_punct]
+    if not words or len(words) > MAX_TOKENS: return None
+    role_for = {"ROOT": "predicate", "nsubj": "subject", "nsubjpass": "subject", "obj": "object / complement", "dobj": "object / complement", "pobj": "object of preposition", "det": "determiner", "amod": "adjective", "advmod": "adverbial modifier", "prep": "preposition", "cc": "conjunction"}
+    nodes = [{"id": i, "text": token.text, "role": role_for.get(token.dep_, "predicate modifier"), "pos": token.pos_, "lemma": token.lemma_, "features": token.morph.to_dict()} for i, token in enumerate(words)]
+    index = {token.i: i for i, token in enumerate(words)}
+    edges = [{"from": i, "to": index[token.head.i], "label": token.dep_} for i, token in enumerate(words) if token.head.i != token.i]
+    phrases = []
+    for chunk in doc.noun_chunks:
+        ids = [index[t.i] for t in chunk if t.i in index]
+        if ids: phrases.append({"kind": "noun phrase", "node_ids": ids})
+    for token in words:
+        if token.dep_ == "prep":
+            ids = [index[t.i] for t in token.subtree if t.i in index]
+            if ids: phrases.append({"kind": "prepositional phrase", "node_ids": ids})
+    clauses = [{"kind": "independent clause" if token.dep_ == "ROOT" else "subordinate clause", "node_ids": [index[t.i] for t in token.subtree if t.i in index]} for token in words if token.pos_ in {"VERB", "AUX"} and (token.dep_ == "ROOT" or "cl" in token.dep_)]
+    if not clauses: clauses = [{"kind": "sentence", "node_ids": list(range(len(nodes)))}]
+    roots = [i for i, node in enumerate(nodes) if node["role"] == "predicate"]
+    subjects = [i for i, node in enumerate(nodes) if node["role"] == "subject"]
+    findings_out = spacy_findings(words, index)
+    result = {"schemaVersion": SCHEMA_VERSION, "provider": {"id": "spacy", "version": "3.8.16", "model": "en_core_web_sm-3.8.0"}, "sentence": {"text": text, "confidence": 0.85}, "mode": mode, "nodes": nodes, "edges": edges, "phrases": phrases, "clauses": clauses, "findings": findings_out, "constructions": spacy_constructions(words, index), "confidence": 0.85, "simplified": False, "diagnostic": "Parsed locally with spaCy English.", "parser": "spaCy English (local)"}
+    return result if validate_model(result) else None
+
+def conllu_features(value: str) -> dict[str, str]:
+    if not value or value == "_": return {}
+    return {item.split("=", 1)[0]: item.split("=", 1)[1] for item in value.split("|") if "=" in item}
+
+def udpipe_diagram(text: str, mode: str) -> dict | None:
+    """Adapt the bundled offline UDPipe artifact into Grammarchy's model."""
+    bundled = bundled_udpipe()
+    if not bundled: return None
+    binary, model_path = bundled
+    try:
+        completed = subprocess.run([str(binary), "--tokenize", "--tag", "--parse", str(model_path)], input=text + "\n", text=True, capture_output=True, timeout=1.5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0 or len(completed.stdout) > 131_072: return None
+    records = []
+    for line in completed.stdout.splitlines():
+        if not line or line.startswith("#"): continue
+        fields = line.split("\t")
+        if len(fields) != 10 or not fields[0].isdigit() or not fields[6].isdigit(): continue
+        records.append({"source_id": int(fields[0]), "text": fields[1], "lemma": fields[2], "pos": fields[3], "tag": fields[4], "features": conllu_features(fields[5]), "head": int(fields[6]), "dep": fields[7]})
+    content = [record for record in records if record["pos"] != "PUNCT"]
+    if not content or len(content) > MAX_TOKENS: return None
+    index = {record["source_id"]: i for i, record in enumerate(content)}
+    by_source = {record["source_id"]: record for record in records}
+    children = {}
+    for record in records: children.setdefault(record["head"], []).append(record)
+    case_heads = {record["head"] for record in content if record["dep"] == "case"}
+    role_for = {"root": "predicate", "nsubj": "subject", "nsubj:pass": "subject", "obj": "object / complement", "iobj": "object / complement", "det": "determiner", "amod": "adjective", "advmod": "adverbial modifier", "case": "preposition", "cc": "conjunction", "aux": "auxiliary verb", "nmod:poss": "determiner"}
+    nodes = []
+    for position, record in enumerate(content):
+        display_role = "object of preposition" if record["source_id"] in case_heads else role_for.get(record["dep"], "predicate modifier")
+        nodes.append({"id": position, "text": record["text"], "role": display_role, "pos": record["pos"], "lemma": record["lemma"] or record["text"].lower(), "features": record["features"]})
+    edges = [{"from": index[record["source_id"]], "to": index[record["head"]], "label": record["dep"]} for record in content if record["head"] in index and record["head"] != record["source_id"]]
+    def subtree(source_id: int) -> list[int]:
+        output, pending, seen = [], [source_id], set()
+        while pending:
+            current = pending.pop()
+            if current in seen: continue
+            seen.add(current)
+            if current in index: output.append(index[current])
+            pending.extend(child["source_id"] for child in children.get(current, []))
+        return sorted(output)
+    phrases = []
+    for record in content:
+        if record["pos"] not in {"NOUN", "PROPN", "PRON"}: continue
+        modifiers = [child["source_id"] for child in children.get(record["source_id"], []) if child["dep"] in {"det", "amod", "compound", "nummod", "poss", "nmod:poss", "flat"}]
+        noun_ids = sorted([index[record["source_id"]]] + [index[item] for item in modifiers if item in index])
+        phrases.append({"kind": "noun phrase", "node_ids": noun_ids})
+        cases = [child["source_id"] for child in children.get(record["source_id"], []) if child["dep"] == "case"]
+        if cases: phrases.append({"kind": "prepositional phrase", "node_ids": sorted(noun_ids + [index[item] for item in cases if item in index])})
+    clauses = []
+    for record in content:
+        if record["pos"] in {"VERB", "AUX"} and record["dep"] in {"root", "advcl", "ccomp", "xcomp", "acl", "acl:relcl", "conj"}:
+            ids = subtree(record["source_id"])
+            if ids: clauses.append({"kind": "independent clause" if record["dep"] == "root" else "subordinate clause", "node_ids": ids})
+    if not clauses: clauses = [{"kind": "sentence", "node_ids": list(range(len(nodes)))}]
+    findings_out = udpipe_findings(content, index)
+    constructions = udpipe_constructions(content, index, children)
+    result = {"schemaVersion": SCHEMA_VERSION, "provider": {"id": "udpipe", "version": UDPIPE_VERSION, "model": UDPIPE_MODEL_VERSION}, "sentence": {"text": text, "confidence": 0.78}, "mode": mode, "nodes": nodes, "edges": edges, "phrases": phrases, "clauses": clauses, "findings": findings_out, "constructions": constructions, "confidence": 0.78, "simplified": False, "diagnostic": "Parsed locally with bundled UDPipe English.", "parser": "UDPipe English (bundled)"}
+    return result if validate_model(result) else None
+
+def udpipe_findings(records: list[dict], index: dict[int, int]) -> list[dict]:
+    by_source = {record["source_id"]: record for record in records}
+    roots = [record for record in records if record["dep"] == "root"]
+    subjects = [record for record in records if record["dep"] in {"nsubj", "nsubj:pass"}]
+    result = []
+    if subjects and roots:
+        result.append({"kind": "correct", "title": "Complete clause", "message": "A subject and finite predicate were identified.", "node_ids": [index[subjects[0]["source_id"]], index[roots[0]["source_id"]]], "rule_id": "CLAUSE-001"})
+    elif roots and roots[0]["features"].get("VerbForm") in {"Part", "Ger"}:
+        result.append({"kind": "possible", "title": "Fragment candidate", "message": "This begins with a non-finite verb but has no clear independent subject-predicate clause.", "node_ids": [index[roots[0]["source_id"]]], "rule_id": "FRAGMENT-001"})
+    else:
+        result.append({"kind": "possible", "title": "Incomplete structure", "message": "No clear independent subject-predicate clause was identified.", "node_ids": [index[roots[0]["source_id"]]] if roots else [], "rule_id": "CLAUSE-001"})
+    agreement_found = False
+    for subject in subjects:
+        verb = by_source.get(subject["head"])
+        if not verb: continue
+        subject_number, verb_number = subject["features"].get("Number"), verb["features"].get("Number")
+        lower = subject["text"].lower()
+        mismatch = (subject_number == "Plur" and verb_number == "Sing") or (subject_number == "Sing" and subject["features"].get("Person") == "3" and verb["features"].get("Person") in {"1", "2"}) or (lower in {"i", "you"} and verb["features"].get("Person") == "3")
+        if mismatch:
+            result.append({"kind": "error", "title": "Subject–verb agreement", "message": "This subject and finite verb do not agree in number or person.", "node_ids": [index[subject["source_id"]], index[verb["source_id"]]], "rule_id": "SVA-001"})
+            agreement_found = True
+    if subjects and roots and not agreement_found:
+        result.append({"kind": "correct", "title": "Subject–verb agreement", "message": "The subject and finite verb agree in this local analysis.", "node_ids": [index[subjects[0]["source_id"]], index[roots[0]["source_id"]]], "rule_id": "SVA-001"})
+    for determiner in records:
+        noun = by_source.get(determiner["head"])
+        if determiner["dep"] != "det" or determiner["text"].lower() not in {"this", "that", "these", "those"} or not noun: continue
+        mismatch = (determiner["text"].lower() in {"this", "that"} and noun["features"].get("Number") == "Plur") or (determiner["text"].lower() in {"these", "those"} and noun["features"].get("Number") == "Sing")
+        if mismatch: result.append({"kind": "error", "title": "Determiner and noun number", "message": "This demonstrative determiner does not match the noun's number.", "node_ids": [index[determiner["source_id"]], index[noun["source_id"]]], "rule_id": "DET-001"})
+    return result
+
+def udpipe_constructions(records: list[dict], index: dict[int, int], children: dict[int, list[dict]]) -> list[dict]:
+    by_source = {record["source_id"]: record for record in records}
+    result = []
+    def add(title: str, message: str, items: list[dict]):
+        ids = sorted({index[item["source_id"]] for item in items if item["source_id"] in index})
+        if ids: result.append({"kind": "pattern", "title": title, "message": message, "node_ids": ids})
+    possessives = [record for record in records if record["dep"] in {"poss", "nmod:poss", "det"} and (record["features"].get("Poss") == "Yes" or record["text"].lower() in {"my", "your", "his", "her", "our", "their", "its"})]
+    if len(possessives) >= 2: add("Repeated possessive pronouns", "Several possessive determiners introduce items in this expression.", possessives)
+    for record in records:
+        head = by_source.get(record["head"])
+        if record["dep"] in {"obj", "dobj"} and head and record["lemma"].lower() == head["lemma"].lower(): add("Cognate object", "The verb and its object share the same base word.", [head, record])
+        if record["text"].lower().endswith(("self", "selves")) and record["features"].get("Reflex") == "Yes": add("Emphatic self-pronoun", "This self-pronoun adds emphasis to another participant in the clause.", [record, head] if head else [record])
+        if record["text"].lower() == "if" and record["dep"] == "mark" and head: add("Conditional clause", "This clause sets a condition for the main clause.", [record, head])
+        if record["dep"] == "case" and head: add("Verb-attached prepositional phrase", "This prepositional phrase adds detail to an action.", [record, head])
+    for verb in records:
+        if verb["lemma"].lower() not in {"cause", "make", "allow", "let", "force"}: continue
+        for complement in children.get(verb["source_id"], []):
+            if complement["dep"] not in {"ccomp", "xcomp"} or complement["pos"] not in {"VERB", "AUX"}: continue
+            finite = any(child["text"].lower() == "that" and child["dep"] == "mark" for child in children.get(complement["source_id"], []))
+            add("Causative finite clause" if finite else "Causative infinitive", "A causative verb introduces a finite clause." if finite else "A causative verb introduces an infinitive action.", [verb, complement])
+    coordinated = [record for record in records if record["dep"] == "conj" and record["pos"] in {"VERB", "AUX"}]
+    if coordinated: add("Coordinated actions", "Conjoined verbs present parallel or sequential actions.", [by_source.get(record["head"], record) for record in coordinated] + coordinated)
+    return result
+
+def validate_model(model: dict) -> bool:
+    """Fail closed before a provider result reaches the QML scene."""
+    if not isinstance(model, dict) or model.get("schemaVersion") != SCHEMA_VERSION: return False
+    provider, sentence = model.get("provider"), model.get("sentence")
+    nodes, edges, phrases, clauses, findings_out, constructions = (model.get(key) for key in ("nodes", "edges", "phrases", "clauses", "findings", "constructions"))
+    if not isinstance(provider, dict) or not all(isinstance(provider.get(key), str) and provider[key] and len(provider[key]) <= 80 for key in ("id", "version", "model")): return False
+    if not isinstance(sentence, dict) or not isinstance(sentence.get("text"), str) or not sentence["text"] or len(sentence["text"]) > MAX_CHARS or not isinstance(sentence.get("confidence"), (int, float)) or not 0 <= sentence["confidence"] <= 1: return False
+    if model.get("mode") not in MODES or not isinstance(nodes, list) or not nodes or len(nodes) > MAX_TOKENS or not isinstance(edges, list) or len(edges) > MAX_TOKENS * 2: return False
+    if not all(isinstance(collection, list) and len(collection) <= MAX_TOKENS * 2 for collection in (phrases, clauses, findings_out, constructions)): return False
+    if not isinstance(model.get("confidence"), (int, float)) or not 0 <= model["confidence"] <= 1 or not isinstance(model.get("simplified"), bool) or not isinstance(model.get("diagnostic"), str) or len(model["diagnostic"]) > 240 or not isinstance(model.get("parser"), str) or not model["parser"] or len(model["parser"]) > 80: return False
+    for index, node in enumerate(nodes):
+        if not isinstance(node, dict) or node.get("id") != index or not isinstance(node.get("text"), str) or not node["text"] or len(node["text"]) > 80 or not isinstance(node.get("role"), str) or not node["role"] or len(node["role"]) > 80 or not isinstance(node.get("pos"), str) or not node["pos"] or len(node["pos"]) > 24 or not isinstance(node.get("lemma"), str) or not node["lemma"] or len(node["lemma"]) > 80 or not isinstance(node.get("features"), dict) or len(node["features"]) > 16 or not all(isinstance(key, str) and len(key) <= 40 and isinstance(value, str) and len(value) <= 80 for key, value in node["features"].items()): return False
+    for edge in edges:
+        if not isinstance(edge, dict) or not all(isinstance(edge.get(key), int) for key in ("from", "to")) or not 0 <= edge["from"] < len(nodes) or not 0 <= edge["to"] < len(nodes) or edge["from"] == edge["to"] or not isinstance(edge.get("label"), str) or not edge["label"] or len(edge["label"]) > 80: return False
+    for group in phrases + clauses:
+        ids = group.get("node_ids") if isinstance(group, dict) else None
+        if not isinstance(group, dict) or not isinstance(group.get("kind"), str) or not group["kind"] or len(group["kind"]) > 80 or not isinstance(ids, list) or not ids or len(ids) > len(nodes) or len(set(ids)) != len(ids) or not all(isinstance(node_id, int) and 0 <= node_id < len(nodes) for node_id in ids): return False
+    for finding in findings_out:
+        ids = finding.get("node_ids") if isinstance(finding, dict) else None
+        if not isinstance(finding, dict) or finding.get("kind") not in {"error", "possible", "correct", "style"} or not isinstance(finding.get("title"), str) or not finding["title"] or len(finding["title"]) > 100 or not isinstance(finding.get("message"), str) or not finding["message"] or len(finding["message"]) > 400 or not isinstance(ids, list) or len(ids) > len(nodes) or len(set(ids)) != len(ids) or not all(isinstance(node_id, int) and 0 <= node_id < len(nodes) for node_id in ids): return False
+    for construction in constructions:
+        ids = construction.get("node_ids") if isinstance(construction, dict) else None
+        if not isinstance(construction, dict) or construction.get("kind") != "pattern" or not isinstance(construction.get("title"), str) or not construction["title"] or len(construction["title"]) > 100 or not isinstance(construction.get("message"), str) or not construction["message"] or len(construction["message"]) > 400 or not isinstance(ids, list) or not ids or len(ids) > len(nodes) or len(set(ids)) != len(ids) or not all(isinstance(node_id, int) and 0 <= node_id < len(nodes) for node_id in ids): return False
+    return True
+
+def diagram(text: str, mode: str = "reed_kellogg") -> dict:
+    if mode not in MODES: raise ValueError("Unknown diagram mode.")
+    words = tokens(text)
+    if not words: raise ValueError("Paste or type one English sentence.")
+    if len(words) > MAX_TOKENS: raise ValueError("The sentence has too many tokens to diagram.")
+    parsed = udpipe_diagram(text, mode) or spacy_diagram(text, mode)
+    if parsed is not None: return parsed
+    verb_indexes = [index for index in range(len(words)) if looks_like_verb(words, index)]
+    verb_index = verb_indexes[0] if verb_indexes else min(1, len(words) - 1)
+    compound = len(verb_indexes) > 1 or any(word.lower() in CONJUNCTIONS for word in words)
+    simplified = not verb_indexes or compound
+    subject_index = next((index for index in range(verb_index - 1, -1, -1) if words[index].lower() not in DETERMINERS | COMMON_ADJECTIVES | CONJUNCTIONS | PREPOSITIONS), 0)
+    preposition_objects = set()
+    for index, word in enumerate(words):
+        if word.lower() in PREPOSITIONS:
+            object_index = next((candidate for candidate in range(index + 1, len(words)) if words[candidate].lower() not in DETERMINERS | COMMON_ADJECTIVES | PREPOSITIONS | CONJUNCTIONS), None)
+            if object_index is not None: preposition_objects.add(object_index)
+    nodes = [{"id": index, "text": word, "role": role(words, index, verb_index, subject_index, preposition_objects)} for index, word in enumerate(words)]
+    direct_object = next((index for index in range(verb_index + 1, len(words)) if words[index].lower() not in DETERMINERS | COMMON_ADJECTIVES | PREPOSITIONS | CONJUNCTIONS and index not in preposition_objects and not words[index].lower().endswith("ly") and words[index].lower() not in {"down", "today", "yesterday"}), None)
+    if direct_object is not None: nodes[direct_object]["role"] = "object / complement"
+    for index, word in enumerate(words):
+        if word.lower() == "down" and index > verb_index: nodes[index]["role"] = "adverbial modifier"
+    for node in nodes:
+        node["pos"] = fallback_part_of_speech(node["role"])
+        node["lemma"] = node["text"].lower()
+        node["features"] = {}
+    edges = []
+    for index, node in enumerate(nodes):
+        if index == verb_index: continue
+        target = verb_index
+        if node["role"] in {"determiner", "adjective"}:
+            target = next((candidate for candidate in range(index + 1, len(nodes)) if nodes[candidate]["role"] in {"subject", "object of preposition", "object / complement"}), verb_index)
+        elif node["role"] == "object of preposition":
+            target = next((candidate for candidate in range(index - 1, -1, -1) if nodes[candidate]["role"] == "preposition"), verb_index)
+        edges.append({"from": index, "to": target, "label": node["role"]})
+    diagnostic = "Local heuristic analysis."
+    if not verb_indexes: diagnostic = "No confident verb was found; this is a simplified diagram."
+    elif compound: diagnostic = "Compound clauses use a simplified local diagram."
+    phrase_nodes = [index for index, node in enumerate(nodes) if node["role"] in {"preposition", "object of preposition", "determiner", "adjective"} and index > verb_index]
+    phrases = [{"kind": "noun phrase", "node_ids": [index for index, node in enumerate(nodes) if node["role"] in {"determiner", "adjective", "subject"} and index <= verb_index]}]
+    if phrase_nodes: phrases.append({"kind": "prepositional phrase", "node_ids": phrase_nodes})
+    clauses = [{"kind": "independent clause", "node_ids": list(range(len(nodes)))}]
+    result = {"schemaVersion": SCHEMA_VERSION, "provider": {"id": "heuristic-baseline", "version": "0.1", "model": "builtin"}, "sentence": {"text": text, "confidence": 0.42 if simplified else 0.68}, "mode": mode, "nodes": nodes, "edges": edges, "phrases": phrases, "clauses": clauses, "findings": findings(words, nodes, verb_index, subject_index), "constructions": [], "confidence": 0.42 if simplified else 0.68, "simplified": simplified, "diagnostic": diagnostic, "parser": "Local heuristic (English)"}
+    if not validate_model(result): raise ValueError("Local parser produced an invalid model.")
+    return result
+
+def clipboard() -> dict:
+    if not shutil.which("wl-paste"): raise RuntimeError("wl-paste is unavailable.")
+    result = subprocess.run(["wl-paste", "--no-newline"], text=True, capture_output=True, timeout=1.5, check=False)
+    if result.returncode: raise RuntimeError("Clipboard is unavailable.")
+    text = clean(result.stdout)
+    maximum = bounded_config()["widget"]["clipboard_max_chars"]
+    if len(text) > maximum: raise ValueError(f"Clipboard sentence is longer than {maximum} characters.")
+    parts = [part for part in SENTENCE_BREAK.split(text) if part]
+    first = parts[0] if parts else text
+    return {"text": first, "status": "Ready" if first else "Paste or type one English sentence.", "requires_confirmation": len(parts) > 1}
+
+def main() -> int:
+    try:
+        if len(sys.argv) < 2: raise ValueError("Usage: grammarchy config | clipboard | parse --mode MODE TEXT")
+        if sys.argv[1] == "config" and len(sys.argv) == 2: result = bounded_config()
+        elif sys.argv[1] == "clipboard" and len(sys.argv) == 2: result = clipboard()
+        elif sys.argv[1] == "parse" and len(sys.argv) == 5 and sys.argv[2] == "--mode": result = diagram(clean(sys.argv[4]), sys.argv[3])
+        else: raise ValueError("Usage: grammarchy config | clipboard | parse --mode MODE TEXT")
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        return 0
+    except (ValueError, RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
+if __name__ == "__main__": raise SystemExit(main())

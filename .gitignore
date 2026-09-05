@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+# User-provided design reference; the marketplace preview lives in assets/.
+Codex Image *.png

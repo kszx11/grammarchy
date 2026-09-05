@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.kspringall.grammarchy",
+  "name": "Grammarchy",
+  "version": "0.2.0",
+  "author": "kspringall",
+  "license": "MIT",
+  "description": "A local-first English grammar map and learning widget for the Omarchy bar.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Grammarchy",
+    "description": "Inspect English grammar locally with diagrams, relationships, feedback, and patterns.",
+    "category": "Productivity",
+    "aliases": ["grammar", "sentence diagram", "reed kellogg"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

@@ -1,0 +1,10 @@
+[widget]
+width_px = 680
+clipboard_max_chars = 1000
+auto_parse_on_open = true
+
+[parser]
+timeout_ms = 2000
+
+[display]
+mode = "reed_kellogg"
