@@ -16,14 +16,32 @@ Analysis uses a bundled UDPipe English parser artifact on Linux x86_64. It runs 
 
 ## Install
 
-From a local checkout, validate and enable the plugin:
+Install and enable the public plugin repository:
 
 ```bash
-omarchy plugin validate ~/.config/omarchy/plugins/io.github.kspringall.grammarchy
-omarchy plugin enable io.github.kspringall.grammarchy right
+omarchy plugin add https://github.com/kszx11/grammarchy.git --enable
 ```
 
-The marketplace install flow performs the equivalent Git checkout and enable action. `config.toml` is optional; copy it to `~/.config/grammarchy/config.toml` only to customize defaults. No sentence text is written to disk or sent over the network.
+`config.toml` is optional; copy it to `~/.config/grammarchy/config.toml` only to customize defaults.
+
+## Remove
+
+Remove the plugin through Omarchy:
+
+```bash
+omarchy plugin remove io.github.kszx11.grammarchy
+```
+
+Removal disables the widget and removes its checkout. It leaves any optional
+user configuration under `~/.config/grammarchy/` untouched; remove that
+directory yourself only if you no longer want those local preferences.
+
+## Privacy
+
+Grammarchy parses sentence text locally. It does not send text over the
+network, use an account, collect telemetry, or persist sentence text. It reads
+the clipboard only when the bar widget is opened, and manual entry works when
+clipboard access is unavailable.
 
 ## Runtime
 

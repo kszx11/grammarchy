@@ -6,12 +6,12 @@ import qs.Ui
 
 BarWidget {
   id: root
-  moduleName: "io.github.kspringall.grammarchy"
+  moduleName: "io.github.kszx11.grammarchy"
   property bool busy: false
   property string status: ""
   property var settings: ({ widget: { width_px: 680, auto_parse_on_open: true }, parser: { timeout_ms: 2000 }, display: { mode: "reed_kellogg" } })
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") !== "" ? Quickshell.env("XDG_CONFIG_HOME") : Quickshell.env("HOME") + "/.config"
-  readonly property string helper: configHome + "/omarchy/plugins/io.github.kspringall.grammarchy/bin/grammarchy"
+  readonly property string helper: configHome + "/omarchy/plugins/io.github.kszx11.grammarchy/bin/grammarchy"
   readonly property bool opened: panel.open
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight

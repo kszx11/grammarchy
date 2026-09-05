@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.kspringall.grammarchy",
+  "id": "io.github.kszx11.grammarchy",
   "name": "Grammarchy",
   "version": "0.2.0",
-  "author": "kspringall",
+  "author": "kszx11",
   "license": "MIT",
   "description": "A local-first English grammar map and learning widget for the Omarchy bar.",
   "kinds": ["bar-widget"],
