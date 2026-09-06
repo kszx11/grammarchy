@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.kszx11.grammarchy",
   "name": "Grammarchy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "kszx11",
   "license": "MIT",
   "description": "A local-first English grammar map and learning widget for the Omarchy bar.",

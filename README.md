@@ -8,7 +8,7 @@ The installed build supports manual entry, clipboard capture with multi-sentence
 
 The Patterns view identifies only clear English structures: conditional clauses, causative infinitives and finite clauses, cognate objects, emphatic self-pronouns, repeated possessive pronouns, coordinated actions, and verb-attached prepositional phrases. It does not infer a sentence's historical source language or make provenance claims.
 
-Analysis uses a bundled UDPipe English parser artifact on Linux x86_64. It runs entirely locally, needs no runtime download or Python package installation, and returns tokens, lemmas, parts of speech, morphology, and dependency relationships. Unsupported architectures use the bounded local heuristic fallback and clearly label that output as simplified. Sentence text is neither persisted nor sent over the network.
+Analysis uses a bundled, upstream-released UDPipe English parser artifact on Linux x86_64. It runs entirely locally, needs no runtime download or Python package installation, and returns tokens, lemmas, parts of speech, morphology, and dependency relationships. Unsupported architectures use the bounded local heuristic fallback and clearly label that output as simplified. Sentence text is neither persisted nor sent over the network.
 
 ## Preview
 
@@ -50,7 +50,7 @@ clipboard access is unavailable.
 - Python 3 for the small local adapter
 - The bundled UDPipe English model on Linux x86_64
 
-The parser artifact is stored inside the plugin checkout at `runtime/linux-x86_64/`. Users do not need to run a setup step or download a model. See `runtime/THIRD_PARTY_NOTICES.md` for the parser/model source, attribution, license, checksums, and architecture scope.
+The parser artifact is stored inside the plugin checkout at `runtime/linux-x86_64/`. Users do not need to run a setup step or download a model. See `runtime/THIRD_PARTY_NOTICES.md` for the parser/model source, attribution, license, checksums, and architecture scope. The exact upstream artifact, source revision, and repeatable verification command are documented in [`docs/BUILD_PROVENANCE.md`](docs/BUILD_PROVENANCE.md).
 
 ## Tests
 

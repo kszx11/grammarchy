@@ -2,15 +2,17 @@
 
 ## UDPipe 1.4.0
 
-`linux-x86_64/udpipe` is built from UDPipe 1.4.0 for Linux x86_64.
-UDPipe is licensed under the Mozilla Public License 2.0. Its source is
-available at <https://github.com/ufal/udpipe/tree/v1.4.0> and the full
-license is at <https://www.mozilla.org/MPL/2.0/>.
+`linux-x86_64/udpipe` is the unmodified `bin-linux64/udpipe` member from the
+official [UDPipe 1.4.0 release](https://github.com/ufal/udpipe/releases/tag/v1.4.0).
+It is licensed under the Mozilla Public License 2.0. The complete source and
+binary provenance chain, including release-archive and source checksums, is
+in [`docs/BUILD_PROVENANCE.md`](../docs/BUILD_PROVENANCE.md). The full license
+text is included at [`licenses/MPL-2.0.txt`](licenses/MPL-2.0.txt).
 
 Binary SHA-256:
 
 ```text
-f268fbd7e14c45a8ea1e9b4c58567db427e9a83519719063a324ae51940a9296
+8770ff2114258a1df1ea8403dcbea92d3336ab6d3e420499d57c54e3dea6a11b
 ```
 
 ## English UD model
@@ -20,6 +22,8 @@ the `bnosac/udpipe.models.ud` project. The project attributes it to the UD
 English data and FastText vectors and licenses the model under CC BY-SA 4.0.
 See its [credits](https://github.com/bnosac/udpipe.models.ud/blob/master/src/english/CREDITS.md)
 and [license](https://github.com/bnosac/udpipe.models.ud/blob/master/src/english/LICENSE).
+The full CC BY-SA 4.0 legal code is included at
+[`licenses/CC-BY-SA-4.0.txt`](licenses/CC-BY-SA-4.0.txt).
 
 Model SHA-256:
 
