@@ -1,17 +1,27 @@
 import importlib.machinery
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
 
 PATH = Path(__file__).parents[1] / "bin" / "grammarchy"
+MANIFEST_PATH = Path(__file__).parents[1] / "manifest.json"
 LOADER = importlib.machinery.SourceFileLoader("grammarchy", str(PATH))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 grammarchy = importlib.util.module_from_spec(SPEC)
 LOADER.exec_module(grammarchy)
 
 class GrammarchyTests(unittest.TestCase):
+    def test_manifest_contract_for_the_release(self):
+        manifest = json.loads(MANIFEST_PATH.read_text())
+        self.assertEqual(manifest["schemaVersion"], 1)
+        self.assertEqual(manifest["id"], "io.github.kszx11.grammarchy")
+        self.assertEqual(manifest["version"], "0.2.1")
+        self.assertEqual(manifest["kinds"], ["bar-widget"])
+        self.assertEqual(manifest["entryPoints"], {"barWidget": "BarWidget.qml"})
+
     def test_normalizes_clipboard_style_text(self):
         self.assertEqual(grammarchy.clean("  “Hello”\n world  "), '"Hello" world')
 

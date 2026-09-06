@@ -9,18 +9,22 @@ UDPipe project. It is **not** a locally compiled or modified executable.
 - Release: [`v1.4.0`](https://github.com/ufal/udpipe/releases/tag/v1.4.0)
 - Git source revision: `a0e72fcb1ba0d36998dc671db4350bbd159861b5`
 - GitHub release asset ID: `318906028`
-- Immutable-version download URL:
+- Stable numeric release-asset endpoint:
+  `https://api.github.com/repos/ufal/udpipe/releases/assets/318906028`
+- Human-readable release download URL:
   `https://github.com/ufal/udpipe/releases/download/v1.4.0/udpipe-1.4.0-bin.zip`
-- Release archive SHA-256:
+- GitHub-published release-asset SHA-256:
   `457f541e204737d354c749b473060a28b2debf625f23075543d9eba78be016c1`
 - Archive member bundled by Grammarchy:
   `udpipe-1.4.0-bin/bin-linux64/udpipe`
 - Bundled binary SHA-256:
   `8770ff2114258a1df1ea8403dcbea92d3336ab6d3e420499d57c54e3dea6a11b`
 
-The archive checksum pins the exact upstream release bytes. The executable
-checksum pins the extracted member. Both must verify before a release is
-accepted into this repository.
+The numeric asset endpoint identifies the precise GitHub release asset rather
+than relying only on a mutable release tag. GitHub's release API publishes the
+archive digest above; Grammarchy verifies that independently published digest
+before extracting the binary. The executable checksum then pins the extracted
+member. Both must verify before a release is accepted into this repository.
 
 ## Source audit reference
 

@@ -5,8 +5,8 @@ set -euo pipefail
 
 readonly ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly WORK_DIR="$(mktemp -d)"
-readonly RELEASE_URL="https://github.com/ufal/udpipe/releases/download/v1.4.0/udpipe-1.4.0-bin.zip"
 readonly RELEASE_ASSET_ID="318906028"
+readonly RELEASE_ASSET_API_URL="https://api.github.com/repos/ufal/udpipe/releases/assets/$RELEASE_ASSET_ID"
 readonly RELEASE_SHA256="457f541e204737d354c749b473060a28b2debf625f23075543d9eba78be016c1"
 readonly ARCHIVE_MEMBER="udpipe-1.4.0-bin/bin-linux64/udpipe"
 readonly BINARY_SHA256="8770ff2114258a1df1ea8403dcbea92d3336ab6d3e420499d57c54e3dea6a11b"
@@ -30,7 +30,9 @@ verify_sha256() {
 }
 
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 2 \
-  --output "$WORK_DIR/udpipe-1.4.0-bin.zip" "$RELEASE_URL"
+  --header 'Accept: application/octet-stream' \
+  --header 'X-GitHub-Api-Version: 2022-11-28' \
+  --output "$WORK_DIR/udpipe-1.4.0-bin.zip" "$RELEASE_ASSET_API_URL"
 verify_sha256 "$RELEASE_SHA256" "$WORK_DIR/udpipe-1.4.0-bin.zip"
 unzip -qq "$WORK_DIR/udpipe-1.4.0-bin.zip" "$ARCHIVE_MEMBER" -d "$WORK_DIR"
 verify_sha256 "$BINARY_SHA256" "$WORK_DIR/$ARCHIVE_MEMBER"
